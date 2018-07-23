@@ -1,4 +1,5 @@
 ﻿#include <KlayGE/KlayGE.hpp>
+#include <KFL/ErrorHandling.hpp>
 #include <KFL/Math.hpp>
 #include <KFL/Util.hpp>
 #include <KFL/XMLDom.hpp>
@@ -47,6 +48,8 @@
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 
+#include <rapidjson/document.h>
+
 #include <MeshMLLib/MeshMLLib.hpp>
 
 using namespace std;
@@ -71,6 +74,246 @@ namespace
 	Quaternion AiQuatToQuat(aiQuaternion const& v)
 	{
 		return Quaternion(v.x, v.y, v.z, v.w);
+	}
+
+	struct Metadata
+	{
+		bool auto_center = false;
+
+		float3 pivot = float3::Zero();
+		float3 translation = float3::Zero();
+		Quaternion rotation = Quaternion::Identity();
+		float3 scale = float3(1, 1, 1);
+		bool swap_yz = false;
+		bool lod = false;
+
+		float3 tex_pivot = float3::Zero();
+		float3 tex_translation = float3::Zero();
+		Quaternion tex_rotation = Quaternion::Identity();
+		float3 tex_scale = float3(1, 1, 1);
+		bool tex_swap_st = false;
+
+		float4x4 transform = float4x4::Identity();
+		float4x4 transform_it = float4x4::Identity();
+
+		float4x4 tex_transform = float4x4::Identity();
+
+		void UpdateTransforms()
+		{
+			transform = MathLib::transformation(&pivot, static_cast<Quaternion*>(nullptr), &scale,
+				&pivot, &rotation, &translation);
+			if (swap_yz)
+			{
+				const float4 tmp = transform.Col(1);
+				transform.Col(1, transform.Col(2));
+				transform.Col(2, tmp);
+			}
+			float4x4 mat3 = transform;
+			mat3.Col(3, float4(0, 0, 0, 1));
+			mat3.Row(3, float4(0, 0, 0, 1));
+			transform_it = MathLib::transpose(MathLib::inverse(mat3));
+
+			tex_transform = MathLib::transformation(&tex_pivot, static_cast<Quaternion*>(nullptr), &tex_scale,
+				&tex_pivot, &tex_rotation, &tex_translation);
+			if (tex_swap_st)
+			{
+				const float4 tmp = tex_transform.Col(0);
+				tex_transform.Col(0, tex_transform.Col(1));
+				tex_transform.Col(1, tmp);
+			}
+		}
+	};
+
+	float GetFloat(rapidjson::Value const & value)
+	{
+		if (value.IsFloat())
+		{
+			return value.GetFloat();
+		}
+		else if (value.IsDouble())
+		{
+			return static_cast<float>(value.GetDouble());
+		}
+		else if (value.IsInt())
+		{
+			return static_cast<float>(value.GetInt());
+		}
+		else if (value.IsUint())
+		{
+			return static_cast<float>(value.GetUint());
+		}
+		else if (value.IsInt64())
+		{
+			return static_cast<float>(value.GetInt64());
+		}
+		else if (value.IsUint64())
+		{
+			return static_cast<float>(value.GetUint64());
+		}
+		else
+		{
+			KFL_UNREACHABLE("Invalid value type.");
+		}
+	}
+
+	Metadata LoadMetadata(std::string_view file_name)
+	{
+		Metadata ret;
+
+		ResIdentifierPtr metadata_file = ResLoader::Instance().Open(file_name);
+		if (metadata_file)
+		{
+			std::string metadata;
+			std::copy(std::istream_iterator<char>(metadata_file->input_stream()), std::istream_iterator<char>(),
+				std::back_inserter<std::string>(metadata));
+
+			rapidjson::Document document;
+			document.Parse(metadata.data());
+			BOOST_ASSERT(!document.HasParseError());
+
+			uint32_t const version = document["version"].GetUint();
+			Verify(version == 1);
+
+			if (document.HasMember("auto_center"))
+			{
+				rapidjson::Value const & auto_center = document["auto_center"];
+				BOOST_ASSERT(auto_center.IsBool());
+				ret.auto_center = auto_center.GetBool();
+			}
+
+			if (document.HasMember("pivot"))
+			{
+				rapidjson::Value const & pivot = document["pivot"];
+				BOOST_ASSERT(pivot.IsArray());
+				BOOST_ASSERT(pivot.Size() >= ret.pivot.size());
+				uint32_t index = 0;
+				for (auto iter = pivot.Begin(); (iter != pivot.End()) && (index < ret.pivot.size()); ++ iter, ++ index)
+				{
+					BOOST_ASSERT(iter->IsNumber());
+					ret.pivot[index] = GetFloat(*iter);
+				}
+			}
+
+			if (document.HasMember("translation"))
+			{
+				rapidjson::Value const & translation = document["translation"];
+				BOOST_ASSERT(translation.IsArray());
+				BOOST_ASSERT(translation.Size() >= ret.translation.size());
+				uint32_t index = 0;
+				for (auto iter = translation.Begin(); (iter != translation.End()) && (index < ret.translation.size()); ++ iter, ++ index)
+				{
+					BOOST_ASSERT(iter->IsNumber());
+					ret.translation[index] = GetFloat(*iter);
+				}
+			}
+
+			if (document.HasMember("rotation"))
+			{
+				rapidjson::Value const & rotation = document["rotation"];
+				BOOST_ASSERT(rotation.IsArray());
+				BOOST_ASSERT(rotation.Size() >= ret.rotation.size());
+				uint32_t index = 0;
+				for (auto iter = rotation.Begin(); (iter != rotation.End()) && (index < ret.rotation.size()); ++ iter, ++ index)
+				{
+					BOOST_ASSERT(iter->IsNumber());
+					ret.rotation[index] = GetFloat(*iter);
+				}
+			}
+
+			if (document.HasMember("scale"))
+			{
+				rapidjson::Value const & scale = document["scale"];
+				BOOST_ASSERT(scale.IsArray());
+				BOOST_ASSERT(scale.Size() >= ret.scale.size());
+				uint32_t index = 0;
+				for (auto iter = scale.Begin(); (iter != scale.End()) && (index < ret.scale.size()); ++ iter, ++ index)
+				{
+					BOOST_ASSERT(iter->IsNumber());
+					ret.scale[index] = GetFloat(*iter);
+				}
+			}
+
+			if (document.HasMember("swap_yz"))
+			{
+				rapidjson::Value const & swap_yz = document["swap_yz"];
+				BOOST_ASSERT(swap_yz.IsBool());
+				ret.swap_yz = swap_yz.GetBool();
+			}
+
+			if (document.HasMember("lod"))
+			{
+				rapidjson::Value const & lod = document["lod"];
+				BOOST_ASSERT(lod.IsBool());
+				ret.lod = lod.GetBool();
+			}
+
+			if (document.HasMember("tex_pivot"))
+			{
+				rapidjson::Value const & pivot = document["tex_pivot"];
+				BOOST_ASSERT(pivot.IsArray());
+				BOOST_ASSERT(pivot.Size() >= 2);
+				uint32_t index = 0;
+				for (auto iter = pivot.Begin(); (iter != pivot.End()) && (index < ret.tex_pivot.size()); ++ iter, ++ index)
+				{
+					BOOST_ASSERT(iter->IsNumber());
+					ret.tex_pivot[index] = GetFloat(*iter);
+				}
+			}
+
+			if (document.HasMember("tex_translation"))
+			{
+				rapidjson::Value const & translation = document["tex_translation"];
+				BOOST_ASSERT(translation.IsArray());
+				BOOST_ASSERT(translation.Size() >= 2);
+				uint32_t index = 0;
+				for (auto iter = translation.Begin(); (iter != translation.End()) && (index < ret.tex_translation.size());
+					++ iter, ++ index)
+				{
+					BOOST_ASSERT(iter->IsNumber());
+					ret.tex_translation[index] = GetFloat(*iter);
+				}
+			}
+
+			if (document.HasMember("tex_rotation_angle"))
+			{
+				rapidjson::Value const & rotation_angle = document["tex_rotation_angle"];
+				ret.tex_rotation = MathLib::rotation_axis(float3(0, 0, 1), GetFloat(rotation_angle));
+			}
+			else if (document.HasMember("tex_rotation"))
+			{
+				rapidjson::Value const & rotation = document["tex_rotation"];
+				BOOST_ASSERT(rotation.IsArray());
+				BOOST_ASSERT(rotation.Size() >= ret.tex_rotation.size());
+				uint32_t index = 0;
+				for (auto iter = rotation.Begin(); (iter != rotation.End()) && (index < ret.tex_rotation.size()); ++ iter, ++ index)
+				{
+					BOOST_ASSERT(iter->IsNumber());
+					ret.tex_rotation[index] = GetFloat(*iter);
+				}
+			}
+
+			if (document.HasMember("tex_scale"))
+			{
+				rapidjson::Value const & scale = document["tex_scale"];
+				BOOST_ASSERT(scale.IsArray());
+				BOOST_ASSERT(scale.Size() >= 2);
+				uint32_t index = 0;
+				for (auto iter = scale.Begin(); (iter != scale.End()) && (index < ret.tex_scale.size()); ++ iter, ++ index)
+				{
+					BOOST_ASSERT(iter->IsNumber());
+					ret.tex_scale[index] = GetFloat(*iter);
+				}
+			}
+
+			if (document.HasMember("tex_swap_st"))
+			{
+				rapidjson::Value const & swap_st = document["tex_swap_st"];
+				BOOST_ASSERT(swap_st.IsBool());
+				ret.tex_swap_st = swap_st.GetBool();
+			}
+		}
+
+		return ret;
 	}
 	
 	struct JointBinding
@@ -307,7 +550,8 @@ namespace
 		}
 	}
 
-	void BuildMeshData(std::vector<Mesh>& meshes, int& vertex_export_settings, JointsMap const& joint_nodes, aiScene const * scene, bool swap_yz, bool inverse_z)
+	void BuildMeshData(std::vector<Mesh>& meshes, int& vertex_export_settings, JointsMap const& joint_nodes, aiScene const * scene,
+		bool update_center, float3& center, Metadata const & input_metadata)
 	{
 		vertex_export_settings = MeshMLObj::VES_None;
 		for (unsigned int mi = 0; mi < scene->mNumMeshes; ++ mi)
@@ -354,51 +598,19 @@ namespace
 			}
 			for (unsigned int vi = 0; vi < mesh->mNumVertices; ++ vi)
 			{
-				positions[vi] = float3(&mesh->mVertices[vi].x);
-				if (inverse_z)
-				{
-					positions[vi].z() = -positions[vi].z();
-				}
-				if (swap_yz)
-				{
-					std::swap(positions[vi].y(), positions[vi].z());
-				}
+				positions[vi] = MathLib::transform_coord(float3(&mesh->mVertices[vi].x), input_metadata.transform) - center;
 
 				if (has_normal)
 				{
-					normals[vi] = float3(&mesh->mNormals[vi].x);
-					if (inverse_z)
-					{
-						normals[vi].z() = -normals[vi].z();
-					}
-					if (swap_yz)
-					{
-						std::swap(normals[vi].y(), normals[vi].z());
-					}
+					normals[vi] = MathLib::transform_normal(float3(&mesh->mNormals[vi].x), input_metadata.transform_it);
 				}
 				if (has_tangent)
 				{
-					tangents[vi] = float3(&mesh->mTangents[vi].x);
-					if (inverse_z)
-					{
-						tangents[vi].z() = -tangents[vi].z();
-					}
-					if (swap_yz)
-					{
-						std::swap(tangents[vi].y(), tangents[vi].z());
-					}
+					tangents[vi] = MathLib::transform_normal(float3(&mesh->mTangents[vi].x), input_metadata.transform);
 				}
 				if (has_binormal)
 				{
-					binormals[vi] = float3(&mesh->mBitangents[vi].x);
-					if (inverse_z)
-					{
-						binormals[vi].z() = -binormals[vi].z();
-					}
-					if (swap_yz)
-					{
-						std::swap(binormals[vi].y(), binormals[vi].z());
-					}
+					binormals[vi] = MathLib::transform_normal(float3(&mesh->mBitangents[vi].x), input_metadata.transform);
 				}
 
 				for (unsigned int tci = 0; tci < AI_MAX_NUMBER_OF_TEXTURECOORDS; ++ tci)
@@ -408,7 +620,8 @@ namespace
 						BOOST_ASSERT(mesh->mTextureCoords[tci] != nullptr);
 						KLAYGE_ASSUME(mesh->mTextureCoords[tci] != nullptr);
 
-						texcoords[tci][vi] = float3(&mesh->mTextureCoords[tci][vi].x);
+						texcoords[tci][vi] = MathLib::transform_coord(float3(&mesh->mTextureCoords[tci][vi].x),
+							input_metadata.tex_transform);
 					}
 				}
 			}
@@ -459,6 +672,24 @@ namespace
 					int vertex_id = bone->mWeights[wi].mVertexId;
 					float weight = bone->mWeights[wi].mWeight;
 					meshes[mi].joint_binding.push_back({joint_id, vertex_id, weight});
+				}
+			}
+		}
+
+		if (input_metadata.auto_center && update_center)
+		{
+			auto aabb = MathLib::compute_aabbox(meshes[0].positions.begin(), meshes[0].positions.end());
+			for (unsigned int mi = 0; mi < scene->mNumMeshes; ++ mi)
+			{
+				auto aabb_mesh = MathLib::compute_aabbox(meshes[mi].positions.begin(), meshes[mi].positions.end());
+				aabb = AABBox(MathLib::minimize(aabb.Min(), aabb_mesh.Min()), MathLib::maximize(aabb.Max(), aabb_mesh.Max()));
+			}
+			center = aabb.Center();
+			for (unsigned int mi = 0; mi < scene->mNumMeshes; ++ mi)
+			{
+				for (auto& pos : meshes[mi].positions)
+				{
+					pos -= center;
 				}
 			}
 		}
@@ -783,7 +1014,7 @@ namespace
 		meshml_obj.NumFrames(action_frame_offset);
 	}
 
-	bool ConvertScene(std::vector<std::string> const & in_names, std::string const & out_name, float scale, bool swap_yz, bool inverse_z,
+	bool ConvertScene(std::vector<std::string> const & in_names, std::string const & out_name, Metadata const & input_metadata,
 		bool quiet)
 	{
 		aiPropertyStore* props = aiCreatePropertyStore();
@@ -820,7 +1051,7 @@ namespace
 
 		aiReleasePropertyStore(props);
 
-		MeshMLObj meshml_obj(scale);
+		MeshMLObj meshml_obj(1.0f);
 		ConvertMaterials(meshml_obj, scenes[0]);
 
 		std::vector<std::vector<Mesh>> meshes(num_lods);
@@ -834,9 +1065,10 @@ namespace
 		BuildJoints(meshml_obj, joint_nodes, scenes[0]);
 
 		int vertex_export_settings = 0;
+		float3 center(0, 0, 0);
 		for (uint32_t lod = 0; lod < num_lods; ++ lod)
 		{
-			BuildMeshData(meshes[lod], vertex_export_settings, joint_nodes, scenes[lod], swap_yz, inverse_z);
+			BuildMeshData(meshes[lod], vertex_export_settings, joint_nodes, scenes[lod], lod == 0, center, input_metadata);
 			RecursiveTransformMesh(meshml_obj, num_lods, lod, float4x4::Identity(), scenes[lod]->mRootNode, meshes[lod], meshes[0]);
 		}
 		BuildActions(meshml_obj, joint_nodes, scenes[0]);
@@ -873,10 +1105,6 @@ int main(int argc, char* argv[])
 {
 	std::string input_name;
 	filesystem::path target_folder;
-	float scale = 1;
-	bool swap_yz = false;
-	bool inverse_z = false;
-	bool lod_inputs = false;
 	bool quiet = false;
 
 	boost::program_options::options_description desc("Allowed options");
@@ -918,21 +1146,25 @@ int main(int argc, char* argv[])
 	{
 		target_folder = vm["target-folder"].as<std::string>();
 	}
+
+	Metadata input_metadata = LoadMetadata(input_name + ".kmeta");
+
 	if (vm.count("scale") > 0)
 	{
-		scale = vm["scale"].as<float>();
+		float scale = vm["scale"].as<float>();
+		input_metadata.scale = float3(scale, scale, scale);
 	}
 	if (vm.count("swap-yz") > 0)
 	{
-		swap_yz = true;
+		input_metadata.swap_yz = true;
 	}
 	if (vm.count("inverse-z") > 0)
 	{
-		inverse_z = true;
+		input_metadata.scale.z() *= -1;
 	}
 	if (vm.count("lod") > 0)
 	{
-		lod_inputs = true;
+		input_metadata.lod = true;
 	}
 	if (vm.count("quiet") > 0)
 	{
@@ -943,7 +1175,7 @@ int main(int argc, char* argv[])
 	filesystem::path const base_name = input_path.stem();
 
 	std::vector<std::string> lod_file_names;
-	if (lod_inputs)
+	if (input_metadata.lod)
 	{
 		filesystem::path const source_folder = input_path.parent_path();
 		filesystem::path const ext_name = input_path.extension();
@@ -985,7 +1217,8 @@ int main(int argc, char* argv[])
 
 	std::string const output_name = (target_folder / base_name).string() + ".meshml";
 
-	bool succ = ConvertScene(lod_file_names, output_name, scale, swap_yz, inverse_z, quiet);
+	input_metadata.UpdateTransforms();
+	bool succ = ConvertScene(lod_file_names, output_name, input_metadata, quiet);
 
 	if (succ && !quiet)
 	{
